@@ -9,4 +9,7 @@ COPY bot.py .
 
 RUN mkdir -p /app/yandex_screenshots
 
+# Используем volume для сохранения данных
+VOLUME ["/app/data"]
+
 CMD ["python", "-u", "bot.py"]
