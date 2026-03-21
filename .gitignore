@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+yandex_screenshots/
+venv/
+env/
+.vscode/
+.idea/
+*.log
