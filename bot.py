@@ -1,7 +1,7 @@
 import asyncio
 import logging
+import sqlite3
 import os
-import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
@@ -22,179 +22,177 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8703950276:AAGP5RX0Ib7cLBgFKJPMjqnA2dtbDuLaknk"
 ADMIN_ID = 8394493239
 
-# Настройки базы данных Supabase
-DATABASE_URL = "postgresql://postgres:T4guYmdZvkR1iqoR@db.oftgbbgtfajndxoliczl.supabase.co:5432/postgres"
-
 # Настройки для стабильности
 RECONNECT_DELAY = 5
 MAX_RECONNECT_ATTEMPTS = 10
 
-# Папка для скриншотов (в Render будет временной, но мы храним пути в БД)
+# Пути к файлам
+DB_PATH = os.path.join(os.path.dirname(__file__), 'yandex_bot.db')
 SCREENSHOTS_DIR = os.path.join(os.path.dirname(__file__), 'yandex_screenshots')
 
-# ====================== Работа с базой данных PostgreSQL ======================
-async def init_db():
-    """Инициализация таблиц в PostgreSQL"""
+def init_db():
+    """Инициализация базы данных SQLite"""
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
         
         # Таблица сотрудников
-        await conn.execute('''
+        cur.execute('''
             CREATE TABLE IF NOT EXISTS employees (
-                user_id BIGINT PRIMARY KEY,
+                user_id INTEGER PRIMARY KEY,
                 phone TEXT NOT NULL,
                 full_name TEXT NOT NULL,
                 username TEXT,
-                registered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                registered_date TIMESTAMP
             )
         ''')
         
         # Таблица скриншотов регистрации Яндекс
-        await conn.execute('''
+        cur.execute('''
             CREATE TABLE IF NOT EXISTS yandex_registrations (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES employees(user_id) ON DELETE CASCADE,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
                 photo_path TEXT,
-                registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                registration_date TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES employees (user_id)
             )
         ''')
         
-        await conn.close()
-        logger.info("PostgreSQL database initialized successfully")
+        conn.commit()
+        conn.close()
+        
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        logger.info(f"Database initialized successfully at {DB_PATH}")
         return True
     except Exception as e:
         logger.error(f"Database init error: {e}")
         return False
 
-async def get_employee(user_id):
-    """Получение информации о сотруднике"""
+def get_employee(user_id):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        employee = await conn.fetchrow('SELECT * FROM employees WHERE user_id = $1', user_id)
-        await conn.close()
-        return employee
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM employees WHERE user_id = ?', (user_id,))
+        employee = cur.fetchone()
+        conn.close()
+        if employee:
+            return {
+                'user_id': employee[0],
+                'phone': employee[1],
+                'full_name': employee[2],
+                'username': employee[3],
+                'registered_date': employee[4]
+            }
+        return None
     except Exception as e:
         logger.error(f"Error getting employee: {e}")
         return None
 
-async def add_employee(user_id, phone, full_name, username=None):
-    """Добавление нового сотрудника"""
+def add_employee(user_id, phone, full_name, username=None):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        await conn.execute('''
-            INSERT INTO employees (user_id, phone, full_name, username, registered_date)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (user_id) DO UPDATE SET
-                phone = EXCLUDED.phone,
-                full_name = EXCLUDED.full_name,
-                username = EXCLUDED.username
-        ''', user_id, phone, full_name, username, datetime.now())
-        await conn.close()
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT OR REPLACE INTO employees (user_id, phone, full_name, username, registered_date)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, phone, full_name, username, datetime.now()))
+        conn.commit()
+        conn.close()
         logger.info(f"New employee added: {user_id}")
         return True
     except Exception as e:
         logger.error(f"Error adding employee: {e}")
         return False
 
-async def add_yandex_registration(user_id, photo_path):
-    """Добавление нового скриншота регистрации Яндекс"""
+def add_yandex_registration(user_id, photo_path):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        await conn.execute('''
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
             INSERT INTO yandex_registrations (user_id, photo_path, registration_date)
-            VALUES ($1, $2, $3)
-        ''', user_id, photo_path, datetime.now())
-        await conn.close()
+            VALUES (?, ?, ?)
+        ''', (user_id, photo_path, datetime.now()))
+        conn.commit()
+        conn.close()
         logger.info(f"New Yandex registration added: {user_id}")
         return True
     except Exception as e:
         logger.error(f"Error adding registration: {e}")
         return False
 
-async def get_registrations_stats(user_id, date):
-    """Получение статистики регистраций за дату"""
+def get_registrations_stats(user_id, date):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        count = await conn.fetchval('''
-            SELECT COUNT(*) FROM yandex_registrations 
-            WHERE user_id = $1 AND DATE(registration_date) = $2
-        ''', user_id, date)
-        await conn.close()
-        return count or 0
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT COUNT(*) as count
+            FROM yandex_registrations 
+            WHERE user_id = ? AND DATE(registration_date) = ?
+        ''', (user_id, date))
+        stats = cur.fetchone()
+        conn.close()
+        return stats[0] if stats else 0
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         return 0
 
-async def get_all_employees():
-    """Получение списка всех сотрудников"""
+def get_all_employees():
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        employees = await conn.fetch('''
-            SELECT user_id, full_name, phone, username 
-            FROM employees 
-            ORDER BY full_name
-        ''')
-        await conn.close()
-        return employees
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('SELECT user_id, full_name, phone, username FROM employees ORDER BY full_name')
+        employees = cur.fetchall()
+        conn.close()
+        return [{'user_id': e[0], 'full_name': e[1], 'phone': e[2], 'username': e[3]} for e in employees]
     except Exception as e:
         logger.error(f"Error getting employees: {e}")
         return []
 
-async def get_all_registrations_total():
-    """Получение общего количества регистраций"""
+def get_employee_registrations_total(user_id):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        total = await conn.fetchval('SELECT COUNT(*) FROM yandex_registrations')
-        await conn.close()
-        return total or 0
-    except Exception as e:
-        logger.error(f"Error getting total: {e}")
-        return 0
-
-async def get_employee_registrations_total(user_id):
-    """Получение общего количества регистраций сотрудника"""
-    try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        total = await conn.fetchval('''
-            SELECT COUNT(*) FROM yandex_registrations WHERE user_id = $1
-        ''', user_id)
-        await conn.close()
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM yandex_registrations WHERE user_id = ?', (user_id,))
+        total = cur.fetchone()[0]
+        conn.close()
         return total or 0
     except Exception as e:
         logger.error(f"Error getting employee total: {e}")
         return 0
 
-async def get_today_stats():
-    """Получение статистики за сегодня по всем сотрудникам"""
+def get_today_stats():
     try:
         today = datetime.now().strftime("%Y-%m-%d")
-        conn = await asyncpg.connect(DATABASE_URL)
-        stats = await conn.fetch('''
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
             SELECT e.full_name, COUNT(r.id) as count
             FROM employees e
-            LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = $1
+            LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
             GROUP BY e.full_name
             ORDER BY e.full_name
-        ''', today)
-        await conn.close()
-        return stats
+        ''', (today,))
+        stats = cur.fetchall()
+        conn.close()
+        return [{'full_name': s[0], 'count': s[1]} for s in stats]
     except Exception as e:
         logger.error(f"Error getting today stats: {e}")
         return []
 
-async def get_date_stats(date):
-    """Получение статистики за конкретную дату"""
+def get_date_stats(date):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        stats = await conn.fetch('''
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
             SELECT e.full_name, COUNT(r.id) as count
             FROM employees e
-            LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = $1
+            LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
             GROUP BY e.full_name
             ORDER BY e.full_name
-        ''', date)
-        await conn.close()
-        return stats
+        ''', (date,))
+        stats = cur.fetchall()
+        conn.close()
+        return [{'full_name': s[0], 'count': s[1]} for s in stats]
     except Exception as e:
         logger.error(f"Error getting date stats: {e}")
         return []
@@ -236,7 +234,7 @@ def get_date_keyboard(employee_id):
 # ====================== Создание бота ======================
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-bot = None
+bot = Bot(token=BOT_TOKEN)
 
 # ====================== Обработчики ======================
 @dp.message(CommandStart())
@@ -247,14 +245,13 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await message.answer(
             "👋 Здравствуйте, Администратор!\n\n"
             "🤖 Бот для учёта скриншотов регистрации в Яндекс.Сервисах\n"
-            "💾 Данные сохраняются в облачной базе данных Supabase\n"
-            "✅ Все данные сохраняются навсегда!\n\n"
+            "💾 Данные сохраняются локально на сервере\n\n"
             "Используйте кнопки для управления:",
             reply_markup=get_admin_keyboard()
         )
         return
     
-    employee = await get_employee(user_id)
+    employee = get_employee(user_id)
     if employee:
         await state.set_state(Form.screenshot)
         await message.answer(
@@ -298,7 +295,7 @@ async def process_full_name(message: types.Message, state: FSMContext):
         await message.answer("❌ Пожалуйста, введите ФИО.")
         return
     
-    await add_employee(message.from_user.id, data['phone'], full_name, message.from_user.username)
+    add_employee(message.from_user.id, data['phone'], full_name, message.from_user.username)
     
     try:
         await bot.send_message(
@@ -317,7 +314,7 @@ async def process_full_name(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ Регистрация завершена!\n\n"
         "📸 Теперь отправляйте скриншоты регистрации в Яндекс.Сервисах.\n"
-        "💾 Каждый скриншот будет сохранен в базу данных!",
+        "💾 Каждый скриншот будет сохранен!",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -327,7 +324,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
         await message.answer("❌ Пожалуйста, отправьте фото (скриншот регистрации в Яндексе).")
         return
     
-    employee = await get_employee(message.from_user.id)
+    employee = get_employee(message.from_user.id)
     if not employee:
         await message.answer("❌ Ошибка! Пожалуйста, перезапустите бота командой /start")
         return
@@ -336,19 +333,17 @@ async def process_screenshot(message: types.Message, state: FSMContext):
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         
-        # Создаем папку для скриншотов
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = os.path.join(SCREENSHOTS_DIR, f"{message.from_user.id}_{timestamp}.jpg")
         await bot.download_file(file.file_path, filename)
         
-        # Сохраняем в базу данных
-        await add_yandex_registration(message.from_user.id, filename)
+        add_yandex_registration(message.from_user.id, filename)
         
         today = datetime.now().strftime("%Y-%m-%d")
-        today_count = await get_registrations_stats(message.from_user.id, today)
-        total_count = await get_employee_registrations_total(message.from_user.id)
+        today_count = get_registrations_stats(message.from_user.id, today)
+        total_count = get_employee_registrations_total(message.from_user.id)
         
         await message.answer(
             f"✅ **Скриншот принят!**\n\n"
@@ -370,7 +365,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
             )
     except Exception as e:
         logger.error(f"Error processing screenshot: {e}")
-        await message.answer("❌ Произошла ошибка при обработке скриншота. Попробуйте еще раз.")
+        await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
 
 # ====================== Админ-команды ======================
 @dp.message(lambda message: message.text == "👥 Список сотрудников")
@@ -378,14 +373,14 @@ async def admin_employees(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     
-    employees = await get_all_employees()
+    employees = get_all_employees()
     if not employees:
         await message.answer("📭 Пока нет зарегистрированных сотрудников.")
         return
     
     text = "👥 **Список сотрудников:**\n\n"
     for i, emp in enumerate(employees, 1):
-        total = await get_employee_registrations_total(emp['user_id'])
+        total = get_employee_registrations_total(emp['user_id'])
         text += f"{i}. {emp['full_name']}\n"
         text += f"   🆔 ID: {emp['user_id']}\n"
         text += f"   📱 Username: @{emp['username'] or 'нет'}\n"
@@ -399,7 +394,7 @@ async def admin_today_stats(message: types.Message):
         return
     
     today = datetime.now().strftime("%d.%m.%Y")
-    stats = await get_today_stats()
+    stats = get_today_stats()
     
     if not stats:
         await message.answer("📭 Пока нет данных.")
@@ -424,8 +419,7 @@ async def admin_ask_date(message: types.Message):
     
     await message.answer(
         "📅 Введите дату в формате **ГГГГ-ММ-ДД**\n\n"
-        "Пример: 2026-03-21\n\n"
-        "Будет показана статистика регистраций за указанную дату.",
+        "Пример: 2026-03-21",
         parse_mode="Markdown"
     )
 
@@ -434,7 +428,7 @@ async def admin_all_sales(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     
-    employees = await get_all_employees()
+    employees = get_all_employees()
     if not employees:
         await message.answer("📭 Пока нет данных.")
         return
@@ -443,7 +437,7 @@ async def admin_all_sales(message: types.Message):
     total_all = 0
     
     for emp in employees:
-        total = await get_employee_registrations_total(emp['user_id'])
+        total = get_employee_registrations_total(emp['user_id'])
         total_all += total
         text += f"👤 **{emp['full_name']}**: {total} шт.\n"
     
@@ -457,10 +451,9 @@ async def handle_date_input(message: types.Message):
     
     try:
         date = message.text.strip()
-        # Проверяем формат даты
         datetime.strptime(date, "%Y-%m-%d")
         
-        stats = await get_date_stats(date)
+        stats = get_date_stats(date)
         formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
         
         text = f"📊 **Статистика регистраций Яндекс**\n"
@@ -489,9 +482,9 @@ async def handle_callbacks(callback: types.CallbackQuery):
     
     if data.startswith("emp_"):
         employee_id = int(data.split("_")[1])
-        employee = await get_employee(employee_id)
+        employee = get_employee(employee_id)
         if employee:
-            total = await get_employee_registrations_total(employee_id)
+            total = get_employee_registrations_total(employee_id)
             await callback.message.edit_text(
                 f"📊 **{employee['full_name']}**\n\n"
                 f"📈 Всего регистраций: {total}\n\n"
@@ -502,9 +495,9 @@ async def handle_callbacks(callback: types.CallbackQuery):
     
     elif data.startswith("date_today_"):
         employee_id = int(data.split("_")[2])
-        employee = await get_employee(employee_id)
+        employee = get_employee(employee_id)
         today = datetime.now().strftime("%Y-%m-%d")
-        count = await get_registrations_stats(employee_id, today)
+        count = get_registrations_stats(employee_id, today)
         
         await callback.message.edit_text(
             f"📊 **{employee['full_name']}**\n"
@@ -516,9 +509,9 @@ async def handle_callbacks(callback: types.CallbackQuery):
     
     elif data.startswith("date_yesterday_"):
         employee_id = int(data.split("_")[2])
-        employee = await get_employee(employee_id)
+        employee = get_employee(employee_id)
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        count = await get_registrations_stats(employee_id, yesterday)
+        count = get_registrations_stats(employee_id, yesterday)
         
         await callback.message.edit_text(
             f"📊 **{employee['full_name']}**\n"
@@ -529,10 +522,10 @@ async def handle_callbacks(callback: types.CallbackQuery):
         )
     
     elif data == "back_employees":
-        employees = await get_all_employees()
+        employees = get_all_employees()
         text = "👥 **Список сотрудников:**\n\n"
         for i, emp in enumerate(employees, 1):
-            total = await get_employee_registrations_total(emp['user_id'])
+            total = get_employee_registrations_total(emp['user_id'])
             text += f"{i}. {emp['full_name']}\n"
             text += f"   🆔 ID: {emp['user_id']}\n"
             text += f"   📱 Username: @{emp['username'] or 'нет'}\n"
@@ -549,8 +542,7 @@ async def handle_callbacks(callback: types.CallbackQuery):
         await callback.message.answer(
             "👋 Здравствуйте, Администратор!\n\n"
             "🤖 Бот для учёта скриншотов регистрации в Яндекс.Сервисах\n"
-            "💾 Данные сохраняются в облачной базе данных Supabase\n"
-            "✅ Все данные сохраняются навсегда!\n\n"
+            "💾 Данные сохраняются локально на сервере\n\n"
             "Используйте кнопки для управления:",
             reply_markup=get_admin_keyboard()
         )
@@ -559,37 +551,16 @@ async def handle_callbacks(callback: types.CallbackQuery):
 
 # ====================== Запуск ======================
 async def main():
-    """Основная функция с обработкой ошибок"""
-    global bot
-    
+    """Основная функция"""
     # Инициализация базы данных
-    await init_db()
+    init_db()
     
-    # Создаем бота
-    bot = Bot(token=BOT_TOKEN)
-    
-    attempt = 0
-    
-    while attempt < MAX_RECONNECT_ATTEMPTS:
-        try:
-            logger.info("Starting bot polling...")
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types(),
-                skip_updates=True
-            )
-            
-        except TelegramNetworkError as e:
-            attempt += 1
-            logger.error(f"Network error (attempt {attempt}/{MAX_RECONNECT_ATTEMPTS}): {e}")
-            await asyncio.sleep(RECONNECT_DELAY * attempt)
-            
-        except Exception as e:
-            attempt += 1
-            logger.error(f"Unexpected error (attempt {attempt}/{MAX_RECONNECT_ATTEMPTS}): {e}")
-            await asyncio.sleep(RECONNECT_DELAY * attempt)
-    
-    logger.critical("Max reconnect attempts reached. Exiting...")
+    logger.info("Starting bot polling...")
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types(),
+        skip_updates=True
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
