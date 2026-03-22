@@ -5,11 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py .
+COPY yandex_bot.py bot.py
 
-RUN mkdir -p /app/yandex_screenshots
+RUN mkdir -p /app/data/yandex_screenshots
 
-# Используем volume для сохранения данных
-VOLUME ["/app/data"]
-
-CMD ["python", "-u", "bot.py"]
+CMD ["python", "bot.py"]
