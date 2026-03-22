@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import F
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +29,7 @@ SCREENSHOTS_DIR = os.path.join(DATA_DIR, "yandex_screenshots")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
-# ====================== Flask веб-сервер (обманка для Render) ======================
+# ====================== Flask веб-сервер ======================
 app = Flask(__name__)
 
 @app.route('/')
@@ -40,7 +41,6 @@ def health():
     return "OK", 200
 
 def run_web_server():
-    """Запуск Flask сервера на порту 10000"""
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
@@ -62,8 +62,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             photo_path TEXT,
-            registration_date TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES employees (user_id)
+            registration_date TIMESTAMP
         )
     ''')
     conn.commit()
@@ -126,10 +125,11 @@ def get_today_registrations():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''
-        SELECT e.full_name, COUNT(r.id)
+        SELECT e.full_name, COUNT(r.id) as count
         FROM employees e
         LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
         GROUP BY e.full_name
+        ORDER BY e.full_name
     ''', (today,))
     stats = cur.fetchall()
     conn.close()
@@ -139,10 +139,11 @@ def get_date_registrations(date):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''
-        SELECT e.full_name, COUNT(r.id)
+        SELECT e.full_name, COUNT(r.id) as count
         FROM employees e
         LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
         GROUP BY e.full_name
+        ORDER BY e.full_name
     ''', (date,))
     stats = cur.fetchall()
     conn.close()
@@ -191,27 +192,27 @@ async def start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     if user_id == ADMIN_ID:
-        await message.answer("👋 Админ-панель Яндекс", reply_markup=admin_keyboard())
+        await message.answer("👋 Админ-панель Яндекс\n\nИспользуйте кнопки для управления:", reply_markup=admin_keyboard())
         return
     
     emp = get_employee(user_id)
     if emp:
         await state.set_state(Form.screenshot)
-        await message.answer(f"👋 Здравствуйте, {emp['full_name']}!\n\n📸 Отправьте скриншот регистрации в Яндекс.Сервисах")
+        await message.answer(f"👋 Здравствуйте, {emp['full_name']}!\n\n📸 Отправьте скриншот регистрации в Яндекс.Сервисах\n✅ Каждый скриншот = 1 регистрация")
     else:
         keyboard = ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
             resize_keyboard=True, one_time_keyboard=True
         )
         await state.set_state(Form.phone)
-        await message.answer("📞 Отправьте номер телефона:", reply_markup=keyboard)
+        await message.answer("🌟 Добро пожаловать!\n\n📞 Отправьте номер телефона:", reply_markup=keyboard)
 
 @dp.message(Form.phone)
 async def get_phone(message: types.Message, state: FSMContext):
     if message.contact:
         await state.update_data(phone=message.contact.phone_number)
         await state.set_state(Form.full_name)
-        await message.answer("✍️ Отправьте ваше ФИО (Фамилия Имя Отчество):", reply_markup=ReplyKeyboardRemove())
+        await message.answer("✅ Спасибо! Теперь отправьте ваше ФИО (Фамилия Имя Отчество).", reply_markup=ReplyKeyboardRemove())
     else:
         await message.answer("❌ Пожалуйста, используйте кнопку для отправки номера телефона")
 
@@ -223,18 +224,18 @@ async def get_fullname(message: types.Message, state: FSMContext):
         return await message.answer("❌ Пожалуйста, введите ФИО")
     
     add_employee(message.from_user.id, data['phone'], full_name, message.from_user.username)
-    await bot.send_message(ADMIN_ID, f"✅ Новый сотрудник зарегистрирован!\n\n👤 ФИО: {full_name}\n🆔 ID: {message.from_user.id}\n📱 Username: @{message.from_user.username or 'нет'}")
+    await bot.send_message(ADMIN_ID, f"✅ **Новый сотрудник!**\n\n👤 {full_name}\n🆔 ID: {message.from_user.id}", parse_mode="Markdown")
     await state.set_state(Form.screenshot)
-    await message.answer("✅ Регистрация завершена!\n\n📸 Теперь отправляйте скриншоты регистрации в Яндекс.Сервисах\nКаждый скриншот будет засчитан как одна регистрация")
+    await message.answer("✅ Регистрация завершена!\n\n📸 Отправляйте скриншоты регистрации в Яндекс.Сервисах")
 
 @dp.message(Form.screenshot)
 async def handle_screenshot(message: types.Message, state: FSMContext):
     if not message.photo:
-        return await message.answer("❌ Пожалуйста, отправьте фото (скриншот регистрации в Яндексе)")
+        return await message.answer("❌ Отправьте фото скриншота")
     
     emp = get_employee(message.from_user.id)
     if not emp:
-        return await message.answer("❌ Ошибка! Пожалуйста, перезапустите бота командой /start")
+        return await message.answer("❌ Ошибка! /start")
     
     try:
         photo = message.photo[-1]
@@ -247,36 +248,44 @@ async def handle_screenshot(message: types.Message, state: FSMContext):
         today_count = get_registrations_count(message.from_user.id, datetime.now().strftime("%Y-%m-%d"))
         total = get_total_registrations(message.from_user.id)
         
-        await message.answer(f"✅ Скриншот принят!\n\n📊 Сегодня: {today_count} регистраций\n📈 Всего: {total} регистраций")
+        await message.answer(f"✅ Скриншот принят!\n📊 Сегодня: {today_count}\n📈 Всего: {total}")
         
         with open(filename, 'rb') as f:
             await bot.send_photo(ADMIN_ID, types.BufferedInputFile(f.read(), filename),
-                               caption=f"📸 Новая регистрация в Яндекс!\n\n👤 Сотрудник: {emp['full_name']}\n🆔 ID: {message.from_user.id}\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📊 Сегодня: {today_count} | Всего: {total}")
+                               caption=f"📸 Новая регистрация!\n👤 {emp['full_name']}\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📊 Сегодня: {today_count}")
     except Exception as e:
         logger.error(e)
-        await message.answer("❌ Произошла ошибка при обработке скриншота. Попробуйте еще раз")
+        await message.answer("❌ Ошибка, попробуйте еще раз")
 
 # ====================== Админ-команды ======================
-@dp.message(lambda m: m.text == "👥 Сотрудники" and m.from_user.id == ADMIN_ID)
+@dp.message(F.text == "👥 Сотрудники")
 async def admin_employees(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     employees = get_all_employees()
     if not employees:
-        return await message.answer("📭 Пока нет зарегистрированных сотрудников")
+        await message.answer("📭 Нет сотрудников")
+        return
     
-    text = "👥 **Список сотрудников:**\n\n"
+    text = "👥 **Сотрудники Яндекс**\n\n"
     for emp in employees:
         total = get_total_registrations(emp['user_id'])
-        text += f"👤 {emp['full_name']}\n   🆔 ID: {emp['user_id']}\n   📱 @{emp['username'] or 'нет'}\n   📸 {total} регистраций\n\n"
+        text += f"👤 {emp['full_name']}\n   🆔 ID: {emp['user_id']}\n   📸 {total} регистраций\n\n"
     
     await message.answer(text, parse_mode="Markdown", reply_markup=emp_keyboard(employees))
 
-@dp.message(lambda m: m.text == "📊 Сегодня" and m.from_user.id == ADMIN_ID)
+@dp.message(F.text == "📊 Сегодня")
 async def admin_today(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     stats = get_today_registrations()
     if not stats:
-        return await message.answer("📭 Пока нет данных")
+        await message.answer("📭 Нет данных за сегодня")
+        return
     
-    text = f"📊 **Статистика регистраций Яндекс**\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    text = f"📊 **Яндекс - {datetime.now().strftime('%d.%m.%Y')}**\n\n"
     total = 0
     for name, count in stats:
         text += f"👤 {name}: {count} шт.\n"
@@ -284,31 +293,48 @@ async def admin_today(message: types.Message):
     text += f"\n📈 **Всего регистраций: {total}**"
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(lambda m: m.text == "📅 По дате" and m.from_user.id == ADMIN_ID)
-async def admin_date(message: types.Message):
-    await message.answer("📅 Введите дату в формате **ГГГГ-ММ-ДД**\n\nПример: 2026-03-21\n\nБудет показана статистика регистраций за указанную дату", parse_mode="Markdown")
+@dp.message(F.text == "📅 По дате")
+async def admin_ask_date(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    await message.answer("📅 Введите дату в формате **ГГГГ-ММ-ДД**\n\nПример: 2026-03-21", parse_mode="Markdown")
 
-@dp.message(lambda m: m.text == "📸 Все регистрации" and m.from_user.id == ADMIN_ID)
-async def admin_all(message: types.Message):
+@dp.message(F.text == "📸 Все регистрации")
+async def admin_all_registrations(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     employees = get_all_employees()
-    text = "📸 **Все регистрации Яндекс по сотрудникам**\n\n"
+    if not employees:
+        await message.answer("📭 Нет данных")
+        return
+    
+    text = "📸 **Все регистрации Яндекс**\n\n"
     total_all = 0
     for emp in employees:
         total = get_total_registrations(emp['user_id'])
         total_all += total
-        text += f"👤 **{emp['full_name']}**: {total} шт.\n"
-    text += f"\n📈 **Общее количество регистраций: {total_all}**"
+        text += f"👤 {emp['full_name']}: {total} шт.\n"
+    text += f"\n📈 **Итого: {total_all}**"
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(lambda m: m.from_user.id == ADMIN_ID)
-async def handle_date(message: types.Message):
+@dp.message()
+async def handle_date_input(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     try:
         date = message.text.strip()
         datetime.strptime(date, "%Y-%m-%d")
         stats = get_date_registrations(date)
         formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
         
-        text = f"📊 **Статистика регистраций Яндекс**\n📅 {formatted_date}\n\n"
+        if not stats:
+            await message.answer(f"📭 Нет данных за {formatted_date}")
+            return
+        
+        text = f"📊 **Яндекс - {formatted_date}**\n\n"
         total = 0
         for name, count in stats:
             text += f"👤 {name}: {count} шт.\n"
@@ -332,7 +358,7 @@ async def callbacks(callback: types.CallbackQuery):
         if emp:
             total = get_total_registrations(user_id)
             await callback.message.edit_text(
-                f"📊 **{emp['full_name']}**\n📈 Всего регистраций: {total}\n\nВыберите период для детального просмотра:",
+                f"📊 **{emp['full_name']}**\n📈 Всего регистраций: {total}\n\nВыберите период:",
                 parse_mode="Markdown", reply_markup=date_keyboard(user_id)
             )
     
@@ -342,7 +368,7 @@ async def callbacks(callback: types.CallbackQuery):
         today = datetime.now().strftime("%Y-%m-%d")
         count = get_registrations_count(user_id, today)
         await callback.message.edit_text(
-            f"📊 **{emp['full_name']}**\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n📸 Регистраций сегодня: {count}",
+            f"📊 **{emp['full_name']}**\n📅 Сегодня: {count} регистраций",
             parse_mode="Markdown", reply_markup=date_keyboard(user_id)
         )
     
@@ -352,39 +378,34 @@ async def callbacks(callback: types.CallbackQuery):
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         count = get_registrations_count(user_id, yesterday)
         await callback.message.edit_text(
-            f"📊 **{emp['full_name']}**\n📅 {(datetime.now() - timedelta(days=1)).strftime('%d.%m.%Y')}\n\n📸 Регистраций вчера: {count}",
+            f"📊 **{emp['full_name']}**\n📅 Вчера: {count} регистраций",
             parse_mode="Markdown", reply_markup=date_keyboard(user_id)
         )
     
     elif data == "back_emp":
         employees = get_all_employees()
-        text = "👥 **Список сотрудников:**\n\n"
+        text = "👥 **Сотрудники Яндекс**\n\n"
         for emp in employees:
             total = get_total_registrations(emp['user_id'])
-            text += f"👤 {emp['full_name']}\n   🆔 ID: {emp['user_id']}\n   📱 @{emp['username'] or 'нет'}\n   📸 {total} регистраций\n\n"
+            text += f"👤 {emp['full_name']}\n   🆔 ID: {emp['user_id']}\n   📸 {total} регистраций\n\n"
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=emp_keyboard(employees))
     
     elif data == "back":
         await callback.message.delete()
-        await callback.message.answer("👋 Админ-панель Яндекс\n\nИспользуйте кнопки для управления:", reply_markup=admin_keyboard())
+        await callback.message.answer("👋 Админ-панель Яндекс", reply_markup=admin_keyboard())
     
     await callback.answer()
 
 # ====================== Запуск ======================
 async def run_bot():
-    """Запуск Telegram бота"""
     init_db()
-    logger.info("Yandex Bot started")
+    logger.info("YandexBot started")
     await dp.start_polling(bot, skip_updates=True)
 
 async def main():
-    """Запуск Flask и бота параллельно"""
-    # Запускаем Flask в отдельном потоке
     web_thread = Thread(target=run_web_server)
     web_thread.daemon = True
     web_thread.start()
-    
-    # Запускаем бота
     await run_bot()
 
 if __name__ == "__main__":
