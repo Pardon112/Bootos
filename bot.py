@@ -3,564 +3,389 @@ import logging
 import sqlite3
 import os
 from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramNetworkError
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен бота и ID администратора
-BOT_TOKEN = "8703950276:AAGP5RX0Ib7cLBgFKJPMjqnA2dtbDuLaknk"
-ADMIN_ID = 8394493239
+# Переменные окружения
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8703950276:AAGP5RX0Ib7cLBgFKJPMjqnA2dtbDuLaknk")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "8394493239"))
 
-# Настройки для стабильности
-RECONNECT_DELAY = 5
-MAX_RECONNECT_ATTEMPTS = 10
+# Пути для данных
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+DB_PATH = os.path.join(DATA_DIR, "yandex_bot.db")
+SCREENSHOTS_DIR = os.path.join(DATA_DIR, "yandex_screenshots")
 
-# Пути к файлам
-DB_PATH = os.path.join(os.path.dirname(__file__), 'yandex_bot.db')
-SCREENSHOTS_DIR = os.path.join(os.path.dirname(__file__), 'yandex_screenshots')
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
+# ====================== Flask веб-сервер (обманка для Render) ======================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Яндекс Бот работает! Статус: Online"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_web_server():
+    """Запуск Flask сервера на порту 10000"""
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+# ====================== База данных ======================
 def init_db():
-    """Инициализация базы данных SQLite"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        
-        # Таблица сотрудников
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS employees (
-                user_id INTEGER PRIMARY KEY,
-                phone TEXT NOT NULL,
-                full_name TEXT NOT NULL,
-                username TEXT,
-                registered_date TIMESTAMP
-            )
-        ''')
-        
-        # Таблица скриншотов регистрации Яндекс
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS yandex_registrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                photo_path TEXT,
-                registration_date TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES employees (user_id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        
-        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-        logger.info(f"Database initialized successfully at {DB_PATH}")
-        return True
-    except Exception as e:
-        logger.error(f"Database init error: {e}")
-        return False
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS employees (
+            user_id INTEGER PRIMARY KEY,
+            phone TEXT NOT NULL,
+            full_name TEXT NOT NULL,
+            username TEXT,
+            registered_date TIMESTAMP
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS yandex_registrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            photo_path TEXT,
+            registration_date TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES employees (user_id)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    logger.info("Database initialized")
 
 def get_employee(user_id):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('SELECT * FROM employees WHERE user_id = ?', (user_id,))
-        employee = cur.fetchone()
-        conn.close()
-        if employee:
-            return {
-                'user_id': employee[0],
-                'phone': employee[1],
-                'full_name': employee[2],
-                'username': employee[3],
-                'registered_date': employee[4]
-            }
-        return None
-    except Exception as e:
-        logger.error(f"Error getting employee: {e}")
-        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM employees WHERE user_id = ?', (user_id,))
+    emp = cur.fetchone()
+    conn.close()
+    if emp:
+        return {'user_id': emp[0], 'phone': emp[1], 'full_name': emp[2], 'username': emp[3]}
+    return None
 
-def add_employee(user_id, phone, full_name, username=None):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            INSERT OR REPLACE INTO employees (user_id, phone, full_name, username, registered_date)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, phone, full_name, username, datetime.now()))
-        conn.commit()
-        conn.close()
-        logger.info(f"New employee added: {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Error adding employee: {e}")
-        return False
+def add_employee(user_id, phone, full_name, username):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('INSERT OR REPLACE INTO employees VALUES (?, ?, ?, ?, ?)',
+                (user_id, phone, full_name, username, datetime.now()))
+    conn.commit()
+    conn.close()
 
-def add_yandex_registration(user_id, photo_path):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            INSERT INTO yandex_registrations (user_id, photo_path, registration_date)
-            VALUES (?, ?, ?)
-        ''', (user_id, photo_path, datetime.now()))
-        conn.commit()
-        conn.close()
-        logger.info(f"New Yandex registration added: {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Error adding registration: {e}")
-        return False
+def add_registration(user_id, photo_path):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('INSERT INTO yandex_registrations (user_id, photo_path, registration_date) VALUES (?, ?, ?)',
+                (user_id, photo_path, datetime.now()))
+    conn.commit()
+    conn.close()
 
-def get_registrations_stats(user_id, date):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT COUNT(*) as count
-            FROM yandex_registrations 
-            WHERE user_id = ? AND DATE(registration_date) = ?
-        ''', (user_id, date))
-        stats = cur.fetchone()
-        conn.close()
-        return stats[0] if stats else 0
-    except Exception as e:
-        logger.error(f"Error getting stats: {e}")
-        return 0
+def get_registrations_count(user_id, date):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM yandex_registrations WHERE user_id = ? AND DATE(registration_date) = ?',
+                (user_id, date))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
 
 def get_all_employees():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('SELECT user_id, full_name, phone, username FROM employees ORDER BY full_name')
-        employees = cur.fetchall()
-        conn.close()
-        return [{'user_id': e[0], 'full_name': e[1], 'phone': e[2], 'username': e[3]} for e in employees]
-    except Exception as e:
-        logger.error(f"Error getting employees: {e}")
-        return []
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT user_id, full_name, username FROM employees ORDER BY full_name')
+    employees = cur.fetchall()
+    conn.close()
+    return [{'user_id': e[0], 'full_name': e[1], 'username': e[2]} for e in employees]
 
-def get_employee_registrations_total(user_id):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM yandex_registrations WHERE user_id = ?', (user_id,))
-        total = cur.fetchone()[0]
-        conn.close()
-        return total or 0
-    except Exception as e:
-        logger.error(f"Error getting employee total: {e}")
-        return 0
+def get_total_registrations(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM yandex_registrations WHERE user_id = ?', (user_id,))
+    total = cur.fetchone()[0]
+    conn.close()
+    return total
 
-def get_today_stats():
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT e.full_name, COUNT(r.id) as count
-            FROM employees e
-            LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
-            GROUP BY e.full_name
-            ORDER BY e.full_name
-        ''', (today,))
-        stats = cur.fetchall()
-        conn.close()
-        return [{'full_name': s[0], 'count': s[1]} for s in stats]
-    except Exception as e:
-        logger.error(f"Error getting today stats: {e}")
-        return []
+def get_today_registrations():
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT e.full_name, COUNT(r.id)
+        FROM employees e
+        LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
+        GROUP BY e.full_name
+    ''', (today,))
+    stats = cur.fetchall()
+    conn.close()
+    return stats
 
-def get_date_stats(date):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT e.full_name, COUNT(r.id) as count
-            FROM employees e
-            LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
-            GROUP BY e.full_name
-            ORDER BY e.full_name
-        ''', (date,))
-        stats = cur.fetchall()
-        conn.close()
-        return [{'full_name': s[0], 'count': s[1]} for s in stats]
-    except Exception as e:
-        logger.error(f"Error getting date stats: {e}")
-        return []
+def get_date_registrations(date):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT e.full_name, COUNT(r.id)
+        FROM employees e
+        LEFT JOIN yandex_registrations r ON e.user_id = r.user_id AND DATE(r.registration_date) = ?
+        GROUP BY e.full_name
+    ''', (date,))
+    stats = cur.fetchall()
+    conn.close()
+    return stats
 
-# ====================== Машина состояний ======================
+# ====================== Состояния ======================
 class Form(StatesGroup):
     phone = State()
     full_name = State()
     screenshot = State()
 
 # ====================== Клавиатуры ======================
-def get_admin_keyboard():
-    keyboard = ReplyKeyboardMarkup(
+def admin_keyboard():
+    return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="👥 Список сотрудников")],
-            [KeyboardButton(text="📊 Статистика за сегодня")],
-            [KeyboardButton(text="📅 Статистика за дату")],
+            [KeyboardButton(text="👥 Сотрудники")],
+            [KeyboardButton(text="📊 Сегодня")],
+            [KeyboardButton(text="📅 По дате")],
             [KeyboardButton(text="📸 Все регистрации")]
         ],
         resize_keyboard=True
     )
-    return keyboard
 
-def get_employee_list_keyboard(employees):
+def emp_keyboard(employees):
     keyboard = []
     for emp in employees:
         keyboard.append([InlineKeyboardButton(text=emp['full_name'], callback_data=f"emp_{emp['user_id']}")])
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def get_date_keyboard(employee_id):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 Сегодня", callback_data=f"date_today_{employee_id}")],
-        [InlineKeyboardButton(text="📆 Вчера", callback_data=f"date_yesterday_{employee_id}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_employees")]
+def date_keyboard(user_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Сегодня", callback_data=f"today_{user_id}")],
+        [InlineKeyboardButton(text="📆 Вчера", callback_data=f"yesterday_{user_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_emp")]
     ])
-    return keyboard
 
-# ====================== Создание бота ======================
+# ====================== Бот ======================
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 bot = Bot(token=BOT_TOKEN)
 
 # ====================== Обработчики ======================
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message, state: FSMContext):
+async def start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     if user_id == ADMIN_ID:
-        await message.answer(
-            "👋 Здравствуйте, Администратор!\n\n"
-            "🤖 Бот для учёта скриншотов регистрации в Яндекс.Сервисах\n"
-            "💾 Данные сохраняются локально на сервере\n\n"
-            "Используйте кнопки для управления:",
-            reply_markup=get_admin_keyboard()
-        )
+        await message.answer("👋 Админ-панель Яндекс", reply_markup=admin_keyboard())
         return
     
-    employee = get_employee(user_id)
-    if employee:
+    emp = get_employee(user_id)
+    if emp:
         await state.set_state(Form.screenshot)
-        await message.answer(
-            f"👋 Здравствуйте, {employee['full_name']}!\n\n"
-            "📸 Пришлите фото регистрации в Яндекс.Сервисах.\n"
-            "✅ Каждый скриншот будет засчитан как одна регистрация."
-        )
+        await message.answer(f"👋 Здравствуйте, {emp['full_name']}!\n\n📸 Отправьте скриншот регистрации в Яндекс.Сервисах")
     else:
-        contact_keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
+            resize_keyboard=True, one_time_keyboard=True
         )
         await state.set_state(Form.phone)
-        await message.answer(
-            "🌟 Добро пожаловать!\n\n"
-            "Для регистрации отправьте номер телефона:",
-            reply_markup=contact_keyboard
-        )
+        await message.answer("📞 Отправьте номер телефона:", reply_markup=keyboard)
 
 @dp.message(Form.phone)
-async def process_phone(message: types.Message, state: FSMContext):
+async def get_phone(message: types.Message, state: FSMContext):
     if message.contact:
         await state.update_data(phone=message.contact.phone_number)
         await state.set_state(Form.full_name)
-        await message.answer(
-            "✅ Спасибо! Теперь отправьте ваше ФИО (Фамилия Имя Отчество).",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        await message.answer("✍️ Отправьте ваше ФИО (Фамилия Имя Отчество):", reply_markup=ReplyKeyboardRemove())
     else:
-        await message.answer("❌ Пожалуйста, используйте кнопку для отправки номера телефона.")
+        await message.answer("❌ Пожалуйста, используйте кнопку для отправки номера телефона")
 
 @dp.message(Form.full_name)
-async def process_full_name(message: types.Message, state: FSMContext):
+async def get_fullname(message: types.Message, state: FSMContext):
     data = await state.get_data()
     full_name = message.text.strip()
-    
     if not full_name:
-        await message.answer("❌ Пожалуйста, введите ФИО.")
-        return
+        return await message.answer("❌ Пожалуйста, введите ФИО")
     
     add_employee(message.from_user.id, data['phone'], full_name, message.from_user.username)
-    
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            f"✅ **Новый сотрудник зарегистрирован!**\n\n"
-            f"🆔 ID: {message.from_user.id}\n"
-            f"📱 Username: @{message.from_user.username or 'нет'}\n"
-            f"👤 ФИО: {full_name}\n"
-            f"📞 Телефон: {data['phone']}",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Error sending admin notification: {e}")
-    
+    await bot.send_message(ADMIN_ID, f"✅ Новый сотрудник зарегистрирован!\n\n👤 ФИО: {full_name}\n🆔 ID: {message.from_user.id}\n📱 Username: @{message.from_user.username or 'нет'}")
     await state.set_state(Form.screenshot)
-    await message.answer(
-        "✅ Регистрация завершена!\n\n"
-        "📸 Теперь отправляйте скриншоты регистрации в Яндекс.Сервисах.\n"
-        "💾 Каждый скриншот будет сохранен!",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await message.answer("✅ Регистрация завершена!\n\n📸 Теперь отправляйте скриншоты регистрации в Яндекс.Сервисах\nКаждый скриншот будет засчитан как одна регистрация")
 
 @dp.message(Form.screenshot)
-async def process_screenshot(message: types.Message, state: FSMContext):
+async def handle_screenshot(message: types.Message, state: FSMContext):
     if not message.photo:
-        await message.answer("❌ Пожалуйста, отправьте фото (скриншот регистрации в Яндексе).")
-        return
+        return await message.answer("❌ Пожалуйста, отправьте фото (скриншот регистрации в Яндексе)")
     
-    employee = get_employee(message.from_user.id)
-    if not employee:
-        await message.answer("❌ Ошибка! Пожалуйста, перезапустите бота командой /start")
-        return
+    emp = get_employee(message.from_user.id)
+    if not emp:
+        return await message.answer("❌ Ошибка! Пожалуйста, перезапустите бота командой /start")
     
     try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         
-        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(SCREENSHOTS_DIR, f"{message.from_user.id}_{timestamp}.jpg")
+        filename = os.path.join(SCREENSHOTS_DIR, f"{message.from_user.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
         await bot.download_file(file.file_path, filename)
+        add_registration(message.from_user.id, filename)
         
-        add_yandex_registration(message.from_user.id, filename)
+        today_count = get_registrations_count(message.from_user.id, datetime.now().strftime("%Y-%m-%d"))
+        total = get_total_registrations(message.from_user.id)
         
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_count = get_registrations_stats(message.from_user.id, today)
-        total_count = get_employee_registrations_total(message.from_user.id)
+        await message.answer(f"✅ Скриншот принят!\n\n📊 Сегодня: {today_count} регистраций\n📈 Всего: {total} регистраций")
         
-        await message.answer(
-            f"✅ **Скриншот принят!**\n\n"
-            f"📊 Сегодня: {today_count} регистраций\n"
-            f"📈 Всего: {total_count} регистраций",
-            parse_mode="Markdown"
-        )
-        
-        with open(filename, 'rb') as photo_file:
-            await bot.send_photo(
-                ADMIN_ID,
-                types.BufferedInputFile(photo_file.read(), filename=f"yandex_{message.from_user.id}_{timestamp}.jpg"),
-                caption=f"📸 **Новая регистрация в Яндекс!**\n\n"
-                        f"👤 Сотрудник: {employee['full_name']}\n"
-                        f"🆔 ID: {message.from_user.id}\n"
-                        f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
-                        f"📊 Сегодня: {today_count} | Всего: {total_count}",
-                parse_mode="Markdown"
-            )
+        with open(filename, 'rb') as f:
+            await bot.send_photo(ADMIN_ID, types.BufferedInputFile(f.read(), filename),
+                               caption=f"📸 Новая регистрация в Яндекс!\n\n👤 Сотрудник: {emp['full_name']}\n🆔 ID: {message.from_user.id}\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📊 Сегодня: {today_count} | Всего: {total}")
     except Exception as e:
-        logger.error(f"Error processing screenshot: {e}")
-        await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
+        logger.error(e)
+        await message.answer("❌ Произошла ошибка при обработке скриншота. Попробуйте еще раз")
 
 # ====================== Админ-команды ======================
-@dp.message(lambda message: message.text == "👥 Список сотрудников")
+@dp.message(lambda m: m.text == "👥 Сотрудники" and m.from_user.id == ADMIN_ID)
 async def admin_employees(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
     employees = get_all_employees()
     if not employees:
-        await message.answer("📭 Пока нет зарегистрированных сотрудников.")
-        return
+        return await message.answer("📭 Пока нет зарегистрированных сотрудников")
     
     text = "👥 **Список сотрудников:**\n\n"
-    for i, emp in enumerate(employees, 1):
-        total = get_employee_registrations_total(emp['user_id'])
-        text += f"{i}. {emp['full_name']}\n"
-        text += f"   🆔 ID: {emp['user_id']}\n"
-        text += f"   📱 Username: @{emp['username'] or 'нет'}\n"
-        text += f"   📸 Всего регистраций: {total}\n\n"
+    for emp in employees:
+        total = get_total_registrations(emp['user_id'])
+        text += f"👤 {emp['full_name']}\n   🆔 ID: {emp['user_id']}\n   📱 @{emp['username'] or 'нет'}\n   📸 {total} регистраций\n\n"
     
-    await message.answer(text, parse_mode="Markdown", reply_markup=get_employee_list_keyboard(employees))
+    await message.answer(text, parse_mode="Markdown", reply_markup=emp_keyboard(employees))
 
-@dp.message(lambda message: message.text == "📊 Статистика за сегодня")
-async def admin_today_stats(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    today = datetime.now().strftime("%d.%m.%Y")
-    stats = get_today_stats()
-    
+@dp.message(lambda m: m.text == "📊 Сегодня" and m.from_user.id == ADMIN_ID)
+async def admin_today(message: types.Message):
+    stats = get_today_registrations()
     if not stats:
-        await message.answer("📭 Пока нет данных.")
-        return
+        return await message.answer("📭 Пока нет данных")
     
-    text = f"📊 **Статистика регистраций Яндекс**\n"
-    text += f"📅 {today}\n\n"
+    text = f"📊 **Статистика регистраций Яндекс**\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
     total = 0
-    
-    for stat in stats:
-        count = stat['count']
+    for name, count in stats:
+        text += f"👤 {name}: {count} шт.\n"
         total += count
-        text += f"👤 {stat['full_name']}: {count} шт.\n"
-    
     text += f"\n📈 **Всего регистраций: {total}**"
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(lambda message: message.text == "📅 Статистика за дату")
-async def admin_ask_date(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    await message.answer(
-        "📅 Введите дату в формате **ГГГГ-ММ-ДД**\n\n"
-        "Пример: 2026-03-21",
-        parse_mode="Markdown"
-    )
+@dp.message(lambda m: m.text == "📅 По дате" and m.from_user.id == ADMIN_ID)
+async def admin_date(message: types.Message):
+    await message.answer("📅 Введите дату в формате **ГГГГ-ММ-ДД**\n\nПример: 2026-03-21\n\nБудет показана статистика регистраций за указанную дату", parse_mode="Markdown")
 
-@dp.message(lambda message: message.text == "📸 Все регистрации")
-async def admin_all_sales(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+@dp.message(lambda m: m.text == "📸 Все регистрации" and m.from_user.id == ADMIN_ID)
+async def admin_all(message: types.Message):
     employees = get_all_employees()
-    if not employees:
-        await message.answer("📭 Пока нет данных.")
-        return
-    
     text = "📸 **Все регистрации Яндекс по сотрудникам**\n\n"
     total_all = 0
-    
     for emp in employees:
-        total = get_employee_registrations_total(emp['user_id'])
+        total = get_total_registrations(emp['user_id'])
         total_all += total
         text += f"👤 **{emp['full_name']}**: {total} шт.\n"
-    
     text += f"\n📈 **Общее количество регистраций: {total_all}**"
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message()
-async def handle_date_input(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
+@dp.message(lambda m: m.from_user.id == ADMIN_ID)
+async def handle_date(message: types.Message):
     try:
         date = message.text.strip()
         datetime.strptime(date, "%Y-%m-%d")
-        
-        stats = get_date_stats(date)
+        stats = get_date_registrations(date)
         formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
         
-        text = f"📊 **Статистика регистраций Яндекс**\n"
-        text += f"📅 {formatted_date}\n\n"
+        text = f"📊 **Статистика регистраций Яндекс**\n📅 {formatted_date}\n\n"
         total = 0
-        
-        for stat in stats:
-            count = stat['count']
+        for name, count in stats:
+            text += f"👤 {name}: {count} шт.\n"
             total += count
-            text += f"👤 {stat['full_name']}: {count} шт.\n"
-        
         text += f"\n📈 **Всего: {total}**"
         await message.answer(text, parse_mode="Markdown")
-        
     except ValueError:
         pass
 
-# ====================== Callback handlers ======================
+# ====================== Callbacks ======================
 @dp.callback_query()
-async def handle_callbacks(callback: types.CallbackQuery):
+async def callbacks(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Нет доступа")
-        return
+        return await callback.answer("Нет доступа")
     
     data = callback.data
     
     if data.startswith("emp_"):
-        employee_id = int(data.split("_")[1])
-        employee = get_employee(employee_id)
-        if employee:
-            total = get_employee_registrations_total(employee_id)
+        user_id = int(data.split("_")[1])
+        emp = get_employee(user_id)
+        if emp:
+            total = get_total_registrations(user_id)
             await callback.message.edit_text(
-                f"📊 **{employee['full_name']}**\n\n"
-                f"📈 Всего регистраций: {total}\n\n"
-                f"Выберите период для детального просмотра:",
-                parse_mode="Markdown",
-                reply_markup=get_date_keyboard(employee_id)
+                f"📊 **{emp['full_name']}**\n📈 Всего регистраций: {total}\n\nВыберите период для детального просмотра:",
+                parse_mode="Markdown", reply_markup=date_keyboard(user_id)
             )
     
-    elif data.startswith("date_today_"):
-        employee_id = int(data.split("_")[2])
-        employee = get_employee(employee_id)
+    elif data.startswith("today_"):
+        user_id = int(data.split("_")[1])
+        emp = get_employee(user_id)
         today = datetime.now().strftime("%Y-%m-%d")
-        count = get_registrations_stats(employee_id, today)
-        
+        count = get_registrations_count(user_id, today)
         await callback.message.edit_text(
-            f"📊 **{employee['full_name']}**\n"
-            f"📅 {datetime.now().strftime('%d.%m.%Y')}\n\n"
-            f"📸 Регистраций сегодня: {count}",
-            parse_mode="Markdown",
-            reply_markup=get_date_keyboard(employee_id)
+            f"📊 **{emp['full_name']}**\n📅 {datetime.now().strftime('%d.%m.%Y')}\n\n📸 Регистраций сегодня: {count}",
+            parse_mode="Markdown", reply_markup=date_keyboard(user_id)
         )
     
-    elif data.startswith("date_yesterday_"):
-        employee_id = int(data.split("_")[2])
-        employee = get_employee(employee_id)
+    elif data.startswith("yesterday_"):
+        user_id = int(data.split("_")[1])
+        emp = get_employee(user_id)
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        count = get_registrations_stats(employee_id, yesterday)
-        
+        count = get_registrations_count(user_id, yesterday)
         await callback.message.edit_text(
-            f"📊 **{employee['full_name']}**\n"
-            f"📅 {(datetime.now() - timedelta(days=1)).strftime('%d.%m.%Y')}\n\n"
-            f"📸 Регистраций вчера: {count}",
-            parse_mode="Markdown",
-            reply_markup=get_date_keyboard(employee_id)
+            f"📊 **{emp['full_name']}**\n📅 {(datetime.now() - timedelta(days=1)).strftime('%d.%m.%Y')}\n\n📸 Регистраций вчера: {count}",
+            parse_mode="Markdown", reply_markup=date_keyboard(user_id)
         )
     
-    elif data == "back_employees":
+    elif data == "back_emp":
         employees = get_all_employees()
         text = "👥 **Список сотрудников:**\n\n"
-        for i, emp in enumerate(employees, 1):
-            total = get_employee_registrations_total(emp['user_id'])
-            text += f"{i}. {emp['full_name']}\n"
-            text += f"   🆔 ID: {emp['user_id']}\n"
-            text += f"   📱 Username: @{emp['username'] or 'нет'}\n"
-            text += f"   📸 Всего регистраций: {total}\n\n"
-        
-        await callback.message.edit_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=get_employee_list_keyboard(employees)
-        )
+        for emp in employees:
+            total = get_total_registrations(emp['user_id'])
+            text += f"👤 {emp['full_name']}\n   🆔 ID: {emp['user_id']}\n   📱 @{emp['username'] or 'нет'}\n   📸 {total} регистраций\n\n"
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=emp_keyboard(employees))
     
     elif data == "back":
         await callback.message.delete()
-        await callback.message.answer(
-            "👋 Здравствуйте, Администратор!\n\n"
-            "🤖 Бот для учёта скриншотов регистрации в Яндекс.Сервисах\n"
-            "💾 Данные сохраняются локально на сервере\n\n"
-            "Используйте кнопки для управления:",
-            reply_markup=get_admin_keyboard()
-        )
+        await callback.message.answer("👋 Админ-панель Яндекс\n\nИспользуйте кнопки для управления:", reply_markup=admin_keyboard())
     
     await callback.answer()
 
 # ====================== Запуск ======================
-async def main():
-    """Основная функция"""
-    # Инициализация базы данных
+async def run_bot():
+    """Запуск Telegram бота"""
     init_db()
+    logger.info("Yandex Bot started")
+    await dp.start_polling(bot, skip_updates=True)
+
+async def main():
+    """Запуск Flask и бота параллельно"""
+    # Запускаем Flask в отдельном потоке
+    web_thread = Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
     
-    logger.info("Starting bot polling...")
-    await dp.start_polling(
-        bot,
-        allowed_updates=dp.resolve_used_update_types(),
-        skip_updates=True
-    )
+    # Запускаем бота
+    await run_bot()
 
 if __name__ == "__main__":
     asyncio.run(main())
